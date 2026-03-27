@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crispr-validator"
+version = "0.1.0"
+description = "Seqspec validator and IGVF-aware download/comparison CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "PyYAML>=6.0",
+  "certifi>=2024.0.0",
+]
+
+[project.scripts]
+seqspec-parser = "seqspec_parser:main"
+seqspec-check = "seqspec_check:main"
+downloading-from-samplesheet = "downloading_from_samplesheet:main"
+
+[tool.setuptools]
+py-modules = [
+  "downloading_from_samplesheet",
+  "igvf_portal",
+  "seqspec_check",
+  "seqspec_parser",
+]

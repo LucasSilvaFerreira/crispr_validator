@@ -1,5 +1,34 @@
 # Seqspec Validator CLI
 
+## Install
+
+Install directly from GitHub:
+
+```bash
+pip install "git+https://github.com/<YOUR-ORG>/<YOUR-REPO>.git"
+```
+
+After install, the console scripts are:
+
+- `seqspec-parser`
+- `seqspec-check`
+- `downloading-from-samplesheet`
+
+Example:
+
+```bash
+seqspec-parser igvf \
+  --accession IGVFDS9445RJOU \
+  --analysis-root igvf_analysis \
+  --igvf-keypair igvf_key.json \
+  --one-lane
+```
+
+Python dependencies are installed by `pip`, but a few runtime tools are still external:
+
+- `seqspec` must be on `PATH` for comparison runs
+- `gsutil` is still required when samplesheets reference `gs://` assets
+
 `seqspec_parser.py` compares `seqspec index` output against the interval predictor from `seqspec_check.py` and writes:
 
 - `seqspec_report.html`
@@ -37,7 +66,7 @@ If the sheet contains IGVF portal URLs, pass credentials with `--igvf-keypair` o
 
 Use this when you want the validator to generate the samplesheet directly from an IGVF analysis-set accession and then optionally download the needed reads/reference files through the IGVF API.
 
-If `vendor/CRISPR_Pipeline/download_development/generate_per_sample.py` is present, `igvf` mode uses that upstream script first and falls back to the local generator only when the upstream repo is absent.
+If `vendor/CRISPR_Pipeline/download_development/generate_per_sample.py` is present, `igvf` mode uses that upstream script first and falls back to the local generator when the upstream script is absent or fails.
 
 Write only the samplesheet:
 
