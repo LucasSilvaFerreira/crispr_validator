@@ -1,3 +1,7 @@
+
+
+
+
 # Seqspec Validator CLI
 
 `seqspec_parser.py` compares `seqspec index` output against the interval predictor from `seqspec_check.py` and writes:
@@ -8,6 +12,72 @@
 - `analysis_summary.json`
 
 It supports two execution modes.
+
+# Quick DACC Guide to Check Already Deposited Samples
+
+Use this workflow to check samples that have already been deposited in DACC. (for not samplesheet check the mode3: single-lane)
+
+
+
+## Download an IGVF portal analysis set and run validation
+
+The command below downloads an IGVF portal analysis set, including the sample sheet and related files, and then runs validation after the download completes.
+
+```bash
+python3 seqspec_parser.py igvf \
+  --accession IGVFDS9445RJOU \
+  --analysis-root igvf_analysis \
+  --igvf-keypair igvf_key.json \
+  --one-lane
+```
+
+This script downloads:
+
+- Seqspec files
+- FASTQ sample information
+- Metadata, including hash and guide information
+
+## Credentials format
+
+Provide your credentials in a JSON file like this:
+
+```json
+{
+  "Key": "xxxxxx",
+  "secret": "xxxxxxxxx"
+}
+```
+
+## Validation output
+
+The validation step returns a JSON file.
+
+In that output, you can find the predicted flag for each modality, similar to what is reported when using SeqSpec indexing.
+
+Example fields include:
+
+```json
+"technology": "0,0,16:0,16,26:1,20,41"
+
+or 
+
+"flag": "perfect_match"
+```
+
+Where:
+
+- `technology` describes the predicted region structure in the cb/umi/feature format (kb)
+- `flag` indicates whether the seqspec and the predicted regions match
+
+## HTML reports
+
+The workflow also generates HTML reports in the same output directory.
+
+These reports can be helpful for spotting differences between the seqspec definition and the predicted regions.
+
+
+
+
 
 ## Mode 1: Samplesheet
 
