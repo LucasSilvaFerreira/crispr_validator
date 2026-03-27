@@ -1,0 +1,16 @@
+*fastq.gz
+*.fastq
+*.tsv
+*.tsv.gz
+*.csv
+*.json
+*.html
+*.yaml
+*.yaml.gz
+.DS_Store
+*.sh
+*.pyc
+*.zip
+*.fq
+*.txt
+dummy_rna_R1
