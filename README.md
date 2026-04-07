@@ -9,7 +9,7 @@
 Install directly from GitHub:
 
 ```bash
-pip install "git+https://github.com/<YOUR-ORG>/<YOUR-REPO>.git"
+pip install "git+https://github.com/LucasSilvaFerreira/crispr_validatorgit"
 ```
 
 After install, the console scripts are:
