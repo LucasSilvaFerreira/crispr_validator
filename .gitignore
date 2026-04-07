@@ -18,3 +18,4 @@
 *.csv.gz
 dummy_rna_R1
 igvf_mar30_2026_one_lane_report/IGVFDS2099RYCK/logs/samplesheet_only.stderr.log
+!igvf_criprs_portal_all_deposited_mar30_2026_samples/igvf_data_analysis_set_report_2026_3_30_15h_13m.tsv

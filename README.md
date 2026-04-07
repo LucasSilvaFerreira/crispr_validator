@@ -124,10 +124,11 @@ Example:
 
 ```bash
 python3 igvf_batch_portal_report.py \
-  --input-report test_fetch.tsv \
+  --input-report  igvf_criprs_portal_all_deposited_mar30_2026_samples/igvf_data_analysis_set_report_2026_3_30_15h_13m.tsv \
   --analysis-root portal_batch_report \
   --igvf-keypair igvf_key.json \
   --fresh-run
+  #--ignore-metadata-md5 #case want to ignore mdsum erros
 ```
 
 Useful flags:
