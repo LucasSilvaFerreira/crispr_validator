@@ -13,4 +13,7 @@
 *.zip
 *.fq
 *.txt
+*.log
+*.csv.gz
 dummy_rna_R1
+igvf_mar30_2026_one_lane_report/IGVFDS2099RYCK/logs/samplesheet_only.stderr.log

@@ -11,7 +11,7 @@ import shutil
 import ssl
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen
@@ -25,6 +25,11 @@ except ImportError:  # pragma: no cover - optional dependency
 PORTAL_BASE = "https://api.data.igvf.org"
 ACTIVE_FILE_STATUSES = {"in progress", "preview", "released"}
 INACTIVE_FILE_STATUSES = {"archived", "deleted", "replaced", "revoked"}
+FILE_TYPE_TO_ROUTE = {
+    "sequence": "sequence-files",
+    "configuration": "configuration-files",
+    "tabular": "tabular-files",
+}
 
 FILE_SET_TYPE_TO_MODALITY = {
     "experimental data": "scRNA",
@@ -297,6 +302,18 @@ def build_file_reference(file_object: Dict[str, object]) -> PortalFileReference:
     )
 
 
+def download_url_for_file_accession(
+    accession: str,
+    file_type: str,
+    credentials: Optional[IGVFCredentials],
+) -> str:
+    route = FILE_TYPE_TO_ROUTE.get(file_type)
+    if not route:
+        raise ValueError(f"Unsupported IGVF file type '{file_type}' for accession lookup.")
+    file_object = portal_json(f"/{route}/{accession}/@@object?format=json", credentials)
+    return build_file_reference(file_object).url
+
+
 def fallback_seqspec_path(
     modality: str,
     *,
@@ -334,75 +351,30 @@ def generate_samplesheet_rows(
     hash_seqspec: Optional[str] = None,
     rna_seqspec: Optional[str] = None,
     sgrna_seqspec: Optional[str] = None,
+    stop_after_first_complete_measurement_set: bool = False,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> List[Dict[str, str]]:
-    analysis_set = portal_json(f"/analysis-sets/{analysis_set_accession}/@@object?format=json", credentials)
-    input_file_sets = [
-        str(link)
-        for link in analysis_set.get("input_file_sets", [])
-        if str(link).startswith("/measurement-sets/") or str(link).startswith("/auxiliary-sets/")
-    ]
-    if not input_file_sets:
-        raise ValueError(f"Analysis set {analysis_set_accession} did not expose measurement/auxiliary input file sets.")
+    def emit(message: str) -> None:
+        if progress:
+            progress(message)
 
-    construct_library_sets = [str(link) for link in analysis_set.get("construct_library_sets", [])]
-    if len(construct_library_sets) != 1:
-        raise ValueError(
-            f"Analysis set {analysis_set_accession} must resolve to exactly one construct library set; "
-            f"found {len(construct_library_sets)}."
-        )
-    construct_library = portal_json(f"{construct_library_sets[0]}@@embedded?format=json", credentials)
-    guide_file = None
-    for file_object in construct_library.get("integrated_content_files", []):
-        status = str(file_object.get("status", "")).strip().lower()
-        if (
-            str(file_object.get("content_type", "")).strip().lower() == "guide rna sequences"
-            and status in ACTIVE_FILE_STATUSES
-        ):
-            file_link = str(file_object.get("@id", "")).strip()
-            guide_source = portal_json(f"{file_link}@@object?format=json", credentials) if file_link else file_object
-            guide_file = build_file_reference(guide_source)
-            break
-    if guide_file is None:
-        raise ValueError(f"Analysis set {analysis_set_accession} is missing an active guide RNA sequences file.")
-
-    measurement_links = [link for link in input_file_sets if link.startswith("/measurement-sets/")]
-    auxiliary_links = [link for link in input_file_sets if link.startswith("/auxiliary-sets/")]
-
-    measurement_properties: Dict[str, Dict[str, object]] = {}
-    per_sample_rows: List[Dict[str, str]] = []
-
-    for file_set_link in [*measurement_links, *auxiliary_links]:
-        file_set = portal_json(f"{file_set_link}@@object?format=json", credentials)
+    def process_file_set(
+        file_set_link: str,
+        file_set: Dict[str, object],
+        *,
+        measurement_sets: str,
+        barcode_onlist_links: Sequence[str],
+        onlist_method: str,
+        strand_specificity: str,
+        step_label: str,
+    ) -> List[Dict[str, str]]:
         file_set_type = str(file_set.get("file_set_type", "")).strip()
         modality = canonical_modality(file_set_type)
         if not modality:
-            continue
+            return []
 
-        measurement_sets = ""
-        barcode_onlist_links = []
-        onlist_method = ""
-        strand_specificity = ""
-        if file_set_link.startswith("/measurement-sets/"):
-            measurement_sets = str(file_set.get("accession", "")).strip()
-            barcode_onlist_links = [str(link) for link in file_set.get("onlist_files", [])]
-            onlist_method = str(file_set.get("onlist_method", "")).strip()
-            strand_specificity = str(file_set.get("strand_specificity", "")).strip()
-            measurement_properties[file_set_link] = {
-                "barcode_onlist_links": barcode_onlist_links,
-                "onlist_method": onlist_method,
-                "strand_specificity": strand_specificity,
-            }
-        else:
-            linked_measurements = [
-                str(link) for link in file_set.get("measurement_sets", []) if str(link) in measurement_properties
-            ]
-            if not linked_measurements:
-                raise ValueError(f"Auxiliary set {file_set_link} did not map to a measurement set in this analysis set.")
-            props = measurement_properties[linked_measurements[0]]
-            barcode_onlist_links = list(props["barcode_onlist_links"])
-            onlist_method = str(props["onlist_method"])
-            strand_specificity = str(props["strand_specificity"])
-            measurement_sets = ", ".join(extract_accession(link) for link in linked_measurements)
+        file_set_accession = str(file_set.get("accession", "")).strip() or extract_accession(file_set_link)
+        emit(f"processing {step_label}: {file_set_accession} ({file_set_type or 'unknown type'})")
 
         if not barcode_onlist_links:
             raise ValueError(f"Missing barcode onlist on {file_set_link}.")
@@ -445,6 +417,7 @@ def generate_samplesheet_rows(
             )
             reads_by_key.setdefault(key, {})[read_type] = file_object
 
+        rows: List[Dict[str, str]] = []
         for (sequencing_run, lane, flowcell_id, index), reads in sorted(reads_by_key.items()):
             read1_object = reads.get("R1")
             read2_object = reads.get("R2")
@@ -477,38 +450,238 @@ def generate_samplesheet_rows(
 
             read1 = build_file_reference(read1_object)
             read2 = build_file_reference(read2_object)
-            row = {
-                "R1_path": read1.url,
-                "R1_accession": read1.accession,
-                "R1_md5sum": read1.md5sum,
-                "R2_path": read2.url,
-                "R2_accession": read2.accession,
-                "R2_md5sum": read2.md5sum,
-                "file_modality": modality,
-                "file_set": str(file_set.get("accession", "")).strip(),
-                "file_set_type": file_set_type,
-                "measurement_sets": measurement_sets,
-                "sequencing_run": sequencing_run,
-                "lane": lane,
-                "flowcell_id": flowcell_id,
-                "index": index,
-                "seqspec": seqspec_path,
-                "seqspec_accession": seqspec_accession,
-                "seqspec_md5sum": seqspec_md5sum,
-                "barcode_onlist": barcode_onlist.url,
-                "barcode_onlist_accession": barcode_onlist.accession,
-                "barcode_onlist_md5sum": barcode_onlist.md5sum,
-                "onlist_method": onlist_method,
-                "strand_specificity": strand_specificity,
-                "guide_design": guide_file.url,
-                "guide_design_accession": guide_file.accession,
-                "guide_design_md5sum": guide_file.md5sum,
-                "barcode_hashtag_map": hash_map.url if hash_map else "",
-                "barcode_hashtag_map_accession": hash_map.accession if hash_map else "",
-                "barcode_hashtag_map_md5sum": hash_map.md5sum if hash_map else "",
-            }
-            per_sample_rows.append(row)
+            rows.append(
+                {
+                    "R1_path": read1.url,
+                    "R1_accession": read1.accession,
+                    "R1_md5sum": read1.md5sum,
+                    "R2_path": read2.url,
+                    "R2_accession": read2.accession,
+                    "R2_md5sum": read2.md5sum,
+                    "file_modality": modality,
+                    "file_set": str(file_set.get("accession", "")).strip(),
+                    "file_set_type": file_set_type,
+                    "measurement_sets": measurement_sets,
+                    "sequencing_run": sequencing_run,
+                    "lane": lane,
+                    "flowcell_id": flowcell_id,
+                    "index": index,
+                    "seqspec": seqspec_path,
+                    "seqspec_accession": seqspec_accession,
+                    "seqspec_md5sum": seqspec_md5sum,
+                    "barcode_onlist": barcode_onlist.url,
+                    "barcode_onlist_accession": barcode_onlist.accession,
+                    "barcode_onlist_md5sum": barcode_onlist.md5sum,
+                    "onlist_method": onlist_method,
+                    "strand_specificity": strand_specificity,
+                    "guide_design": guide_file.url,
+                    "guide_design_accession": guide_file.accession,
+                    "guide_design_md5sum": guide_file.md5sum,
+                    "barcode_hashtag_map": hash_map.url if hash_map else "",
+                    "barcode_hashtag_map_accession": hash_map.accession if hash_map else "",
+                    "barcode_hashtag_map_md5sum": hash_map.md5sum if hash_map else "",
+                }
+            )
 
+        emit(f"completed {file_set_accession}: added {len(rows)} paired rows for modality {modality}")
+        return rows
+
+    def load_auxiliary_specs(
+        measurement_links: Sequence[str],
+        auxiliary_links: Sequence[str],
+    ) -> List[Dict[str, object]]:
+        auxiliary_specs: List[Dict[str, object]] = []
+        for auxiliary_link in auxiliary_links:
+            auxiliary_set = portal_json(f"{auxiliary_link}@@object?format=json", credentials)
+            linked_measurements = [
+                str(link) for link in auxiliary_set.get("measurement_sets", []) if str(link) in measurement_links
+            ]
+            if not linked_measurements:
+                raise ValueError(
+                    f"Auxiliary set {auxiliary_link} did not map to a measurement set in this analysis set."
+                )
+            auxiliary_specs.append(
+                {
+                    "link": auxiliary_link,
+                    "object": auxiliary_set,
+                    "linked_measurements": linked_measurements,
+                }
+            )
+        return auxiliary_specs
+
+    def collect_all_rows(
+        measurement_links: Sequence[str],
+        auxiliary_links: Sequence[str],
+        auxiliary_specs: Sequence[Dict[str, object]],
+    ) -> List[Dict[str, str]]:
+        measurement_properties: Dict[str, Dict[str, object]] = {}
+        per_sample_rows: List[Dict[str, str]] = []
+        ordered_file_sets = [*measurement_links, *auxiliary_links]
+        auxiliary_specs_by_link = {
+            str(spec["link"]): spec for spec in auxiliary_specs
+        }
+
+        for position, file_set_link in enumerate(ordered_file_sets, start=1):
+            if file_set_link.startswith("/measurement-sets/"):
+                file_set = portal_json(f"{file_set_link}@@object?format=json", credentials)
+                file_set_type = str(file_set.get("file_set_type", "")).strip()
+                modality = canonical_modality(file_set_type)
+                if not modality:
+                    continue
+                measurement_properties[file_set_link] = {
+                    "barcode_onlist_links": [str(link) for link in file_set.get("onlist_files", [])],
+                    "onlist_method": str(file_set.get("onlist_method", "")).strip(),
+                    "strand_specificity": str(file_set.get("strand_specificity", "")).strip(),
+                }
+                per_sample_rows.extend(
+                    process_file_set(
+                        file_set_link,
+                        file_set,
+                        measurement_sets=str(file_set.get("accession", "")).strip(),
+                        barcode_onlist_links=measurement_properties[file_set_link]["barcode_onlist_links"],
+                        onlist_method=str(measurement_properties[file_set_link]["onlist_method"]),
+                        strand_specificity=str(measurement_properties[file_set_link]["strand_specificity"]),
+                        step_label=f"file set {position}/{len(ordered_file_sets)}",
+                    )
+                )
+                continue
+
+            auxiliary_spec = auxiliary_specs_by_link[file_set_link]
+            linked_measurements = list(auxiliary_spec["linked_measurements"])
+            resolvable_links = [link for link in linked_measurements if link in measurement_properties]
+            if not resolvable_links:
+                raise ValueError(f"Auxiliary set {file_set_link} did not map to a measurement set in this analysis set.")
+            props = measurement_properties[resolvable_links[0]]
+            per_sample_rows.extend(
+                process_file_set(
+                    file_set_link,
+                    auxiliary_spec["object"],
+                    measurement_sets=", ".join(extract_accession(link) for link in linked_measurements),
+                    barcode_onlist_links=list(props["barcode_onlist_links"]),
+                    onlist_method=str(props["onlist_method"]),
+                    strand_specificity=str(props["strand_specificity"]),
+                    step_label=f"file set {position}/{len(ordered_file_sets)}",
+                )
+            )
+
+        return per_sample_rows
+
+    emit("fetching analysis-set metadata from the portal")
+    analysis_set = portal_json(f"/analysis-sets/{analysis_set_accession}/@@object?format=json", credentials)
+    input_file_sets = [
+        str(link)
+        for link in analysis_set.get("input_file_sets", [])
+        if str(link).startswith("/measurement-sets/") or str(link).startswith("/auxiliary-sets/")
+    ]
+    if not input_file_sets:
+        raise ValueError(f"Analysis set {analysis_set_accession} did not expose measurement/auxiliary input file sets.")
+    emit(f"found {len(input_file_sets)} measurement/auxiliary input file sets")
+
+    construct_library_sets = [str(link) for link in analysis_set.get("construct_library_sets", [])]
+    if len(construct_library_sets) != 1:
+        raise ValueError(
+            f"Analysis set {analysis_set_accession} must resolve to exactly one construct library set; "
+            f"found {len(construct_library_sets)}."
+        )
+    emit(f"resolving construct library {extract_accession(construct_library_sets[0])} for guide metadata")
+    construct_library = portal_json(f"{construct_library_sets[0]}@@embedded?format=json", credentials)
+    guide_file = None
+    for file_object in construct_library.get("integrated_content_files", []):
+        status = str(file_object.get("status", "")).strip().lower()
+        if (
+            str(file_object.get("content_type", "")).strip().lower() == "guide rna sequences"
+            and status in ACTIVE_FILE_STATUSES
+        ):
+            file_link = str(file_object.get("@id", "")).strip()
+            guide_source = portal_json(f"{file_link}@@object?format=json", credentials) if file_link else file_object
+            guide_file = build_file_reference(guide_source)
+            break
+    if guide_file is None:
+        raise ValueError(f"Analysis set {analysis_set_accession} is missing an active guide RNA sequences file.")
+
+    measurement_links = [link for link in input_file_sets if link.startswith("/measurement-sets/")]
+    auxiliary_links = [link for link in input_file_sets if link.startswith("/auxiliary-sets/")]
+    auxiliary_specs = load_auxiliary_specs(measurement_links, auxiliary_links)
+    required_modalities = {"scRNA", "gRNA"}
+    if any(
+        canonical_modality(str(spec["object"].get("file_set_type", "")).strip()) == "hash"
+        for spec in auxiliary_specs
+    ):
+        required_modalities.add("hash")
+
+    if stop_after_first_complete_measurement_set:
+        emit(
+            "one-lane fast path enabled: stop after the first measurement set with "
+            f"{'+'.join(sorted(required_modalities))} coverage"
+        )
+        for position, measurement_link in enumerate(measurement_links, start=1):
+            measurement_set = portal_json(f"{measurement_link}@@object?format=json", credentials)
+            file_set_type = str(measurement_set.get("file_set_type", "")).strip()
+            modality = canonical_modality(file_set_type)
+            if not modality:
+                continue
+            measurement_accession = str(measurement_set.get("accession", "")).strip() or extract_accession(
+                measurement_link
+            )
+            emit(
+                f"evaluating measurement set {position}/{len(measurement_links)}: "
+                f"{measurement_accession} ({file_set_type or 'unknown type'})"
+            )
+            barcode_onlist_links = [str(link) for link in measurement_set.get("onlist_files", [])]
+            onlist_method = str(measurement_set.get("onlist_method", "")).strip()
+            strand_specificity = str(measurement_set.get("strand_specificity", "")).strip()
+            candidate_rows = process_file_set(
+                measurement_link,
+                measurement_set,
+                measurement_sets=measurement_accession,
+                barcode_onlist_links=barcode_onlist_links,
+                onlist_method=onlist_method,
+                strand_specificity=strand_specificity,
+                step_label=f"measurement file set {position}/{len(measurement_links)}",
+            )
+
+            linked_auxiliary_specs = [
+                spec for spec in auxiliary_specs if measurement_link in list(spec["linked_measurements"])
+            ]
+            if linked_auxiliary_specs:
+                emit(
+                    f"{measurement_accession}: processing {len(linked_auxiliary_specs)} linked auxiliary file set(s)"
+                )
+            for auxiliary_position, auxiliary_spec in enumerate(linked_auxiliary_specs, start=1):
+                candidate_rows.extend(
+                    process_file_set(
+                        str(auxiliary_spec["link"]),
+                        auxiliary_spec["object"],
+                        measurement_sets=", ".join(
+                            extract_accession(link) for link in auxiliary_spec["linked_measurements"]
+                        ),
+                        barcode_onlist_links=barcode_onlist_links,
+                        onlist_method=onlist_method,
+                        strand_specificity=strand_specificity,
+                        step_label=(
+                            f"linked auxiliary {auxiliary_position}/{len(linked_auxiliary_specs)} "
+                            f"for {measurement_accession}"
+                        ),
+                    )
+                )
+
+            modalities = {row["file_modality"] for row in candidate_rows}
+            if required_modalities.issubset(modalities):
+                emit(
+                    f"found complete measurement set {measurement_accession}: "
+                    f"modalities={', '.join(sorted(modalities))}; stopping early"
+                )
+                emit(f"portal samplesheet generation complete with {len(candidate_rows)} rows")
+                return candidate_rows
+
+        emit(
+            "no single measurement set contained the required modalities "
+            f"({'+'.join(sorted(required_modalities))}); "
+            "falling back to the full measurement/auxiliary walk"
+        )
+
+    per_sample_rows = collect_all_rows(measurement_links, auxiliary_links, auxiliary_specs)
     if not per_sample_rows:
         raise ValueError(f"No supported per-sample rows could be derived for analysis set {analysis_set_accession}.")
+    emit(f"portal samplesheet generation complete with {len(per_sample_rows)} rows")
     return per_sample_rows

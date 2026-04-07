@@ -33,6 +33,7 @@ from downloading_from_samplesheet import (
 )
 from igvf_portal import (
     IGVFCredentials,
+    download_url_for_file_accession,
     download_file as download_igvf_file,
     generate_samplesheet_rows,
     load_credentials as load_igvf_credentials,
@@ -83,6 +84,15 @@ METADATA_COLUMNS = {
     "barcode_onlist": "barcodeWhitelist",
     "guide_design": "guideMetadata",
     "barcode_hashtag_map": "hashMetadata",
+}
+
+UPSTREAM_ACCESSION_COLUMNS = {
+    "R1_path": "sequence",
+    "R2_path": "sequence",
+    "seqspec": "configuration",
+    "barcode_onlist": "tabular",
+    "guide_design": "tabular",
+    "barcode_hashtag_map": "tabular",
 }
 
 PORTAL_MODALITY_CANONICAL = {
@@ -194,6 +204,11 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Stage FASTQ chunks, seqspecs, and metadata, then stop before seqspec/prediction/report steps",
     )
     parser.add_argument("--force-download", action="store_true", help="Re-download assets even if local copies exist")
+    parser.add_argument(
+        "--ignore-metadata-md5",
+        action="store_true",
+        help="Skip MD5 verification for barcode whitelist, guide metadata, hash metadata, and seqspec downloads",
+    )
     parser.add_argument("--seqspec-bin", default="seqspec", help="Path to the seqspec executable")
     parser.add_argument("--barcode-sample-reads", type=int, default=10_000)
     parser.add_argument("--feature-sample-reads", type=int, default=100_000)
@@ -485,6 +500,23 @@ def igvf_credentials_from_args(args: argparse.Namespace, *, required: bool = Fal
     )
 
 
+def normalize_upstream_igvf_samplesheet_paths(
+    samplesheet_path: Path,
+    credentials: Optional[IGVFCredentials],
+) -> None:
+    rows = load_rows(str(samplesheet_path))
+    changed = False
+    for row in rows:
+        for column, file_type in UPSTREAM_ACCESSION_COLUMNS.items():
+            value = row.get(column, "")
+            if not is_igvf_accession(value):
+                continue
+            row[column] = download_url_for_file_accession(value, file_type, credentials)
+            changed = True
+    if changed:
+        write_igvf_samplesheet(rows, samplesheet_path)
+
+
 def run_gsutil_copy(remote_path: str, local_path: Path, chunk_bytes: int, is_fastq: bool, env: Dict[str, str]) -> None:
     ensure_parent(local_path)
     if is_fastq and chunk_bytes > 0:
@@ -590,6 +622,7 @@ def ensure_group_assets(
     force_download: bool,
     env: Dict[str, str],
     credentials: Optional[IGVFCredentials],
+    ignore_metadata_md5: bool = False,
 ) -> Dict[str, Dict[str, str]]:
     resolved: Dict[str, Dict[str, str]] = {}
     for raw_modality, row in rows_by_modality.items():
@@ -645,7 +678,7 @@ def ensure_group_assets(
                 force_download,
                 env,
                 credentials,
-                expected_md5=row.get(f"{column}_md5sum", ""),
+                expected_md5=None if ignore_metadata_md5 else row.get(f"{column}_md5sum", ""),
                 igvf_file_type="tabular",
             )
             modality_files[column] = str(local_path)
@@ -662,7 +695,7 @@ def ensure_group_assets(
                 force_download,
                 env,
                 credentials,
-                expected_md5=row.get("seqspec_md5sum", ""),
+                expected_md5=None if ignore_metadata_md5 else row.get("seqspec_md5sum", ""),
                 igvf_file_type="configuration",
             )
             modality_files["seqspec"] = str(local_seqspec)
@@ -731,11 +764,15 @@ def extract_region_definitions(seqspec_data: Dict[str, object]) -> Dict[str, Dic
 
 
 def summarize_feature_metadata(path: Path) -> FeatureMetadataSummary:
-    delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
     opener = gzip.open if path.suffix.lower() == ".gz" else open
-    if path.suffix.lower() == ".gz":
-        nested_suffixes = Path(path.stem).suffixes
-        if nested_suffixes and nested_suffixes[-1].lower() == ".tsv":
+    with opener(path, "rt", encoding="utf-8") as handle:
+        delimiter = ","
+        first_line = ""
+        for line in handle:
+            first_line = line.strip()
+            if first_line:
+                break
+        if first_line and first_line.count("\t") > first_line.count(","):
             delimiter = "\t"
     with opener(path, "rt", encoding="utf-8") as handle:
         reader = csv.reader(handle, delimiter=delimiter)
@@ -744,7 +781,14 @@ def summarize_feature_metadata(path: Path) -> FeatureMetadataSummary:
         raise ValueError(f"Could not read headers from {path}")
 
     header = [field.strip() for field in rows[0]]
-    sequence_index = next((idx for idx, column in enumerate(header) if column in {"spacer", "sequence", "guide", "seq"}), None)
+    sequence_index = next(
+        (
+            idx
+            for idx, column in enumerate(header)
+            if column in {"spacer", "sequence", "guide", "seq", "protospacer", "protospacer_sequence"}
+        ),
+        None,
+    )
     sequence_column = header[sequence_index] if sequence_index is not None else ""
     data_rows = rows[1:]
 
@@ -1377,6 +1421,7 @@ def process_group(
         force_download=args.force_download,
         env=env,
         credentials=credentials,
+        ignore_metadata_md5=getattr(args, "ignore_metadata_md5", False),
     )
 
     if args.download_only:
@@ -1586,20 +1631,24 @@ def run_samplesheet_mode(args: argparse.Namespace, analysis_root: Path, env: Dic
 
 
 def run_igvf_mode(args: argparse.Namespace, analysis_root: Path, env: Dict[str, str]) -> None:
+    credentials = igvf_credentials_from_args(args, required=True)
     if args.samplesheet_out:
         samplesheet_path = Path(args.samplesheet_out)
     else:
         samplesheet_path = analysis_root / f"{sanitize_label(args.accession)}_samplesheet.tsv"
     if not write_igvf_samplesheet_via_upstream(args, env, samplesheet_path):
-        credentials = igvf_credentials_from_args(args, required=True)
         rows = generate_samplesheet_rows(
             args.accession,
             credentials,
             hash_seqspec=args.hash_seqspec,
             rna_seqspec=args.rna_seqspec,
             sgrna_seqspec=args.sgrna_seqspec,
+            stop_after_first_complete_measurement_set=args.one_lane,
+            progress=lambda message: print(f"IGVF samplesheet: {message}", flush=True),
         )
         write_igvf_samplesheet(rows, samplesheet_path)
+    else:
+        normalize_upstream_igvf_samplesheet_paths(samplesheet_path, credentials)
     print(f"Wrote IGVF samplesheet to {samplesheet_path}")
     if args.samplesheet_only:
         return

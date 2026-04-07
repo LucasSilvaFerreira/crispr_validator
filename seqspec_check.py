@@ -152,6 +152,18 @@ def read_fastq_sequences(filename: str, max_reads: int) -> List[str]:
     return sequences
 
 
+def sniff_tabular_delimiter(path: str) -> str:
+    with open_file(path, "rt") as handle:
+        for line in handle:
+            sample = line.strip()
+            if not sample:
+                continue
+            if sample.count("\t") > sample.count(","):
+                return "\t"
+            return ","
+    return ","
+
+
 def mode_read_length(reads: Sequence[str]) -> int:
     if not reads:
         return 0
@@ -174,7 +186,7 @@ def load_barcode_whitelist(path: str) -> Tuple[set[str], int]:
 
 
 def load_feature_sequences(path: str) -> List[str]:
-    delimiter = "\t" if path.endswith(".tsv") or path.endswith(".tsv.gz") else ","
+    delimiter = sniff_tabular_delimiter(path)
     with open_file(path, "rt") as handle:
         reader = csv.reader(handle, delimiter=delimiter)
         rows = list(reader)
@@ -182,7 +194,14 @@ def load_feature_sequences(path: str) -> List[str]:
         raise ValueError(f"Could not read headers from {path}")
 
     header = [field.strip() for field in rows[0]]
-    target_index = next((idx for idx, col in enumerate(header) if col in {"spacer", "sequence", "guide", "seq"}), None)
+    target_index = next(
+        (
+            idx
+            for idx, col in enumerate(header)
+            if col in {"spacer", "sequence", "guide", "seq", "protospacer", "protospacer_sequence"}
+        ),
+        None,
+    )
     data_rows = rows[1:]
 
     if target_index is None:
@@ -723,9 +742,13 @@ def resolve_inputs(args: argparse.Namespace) -> Dict[str, object]:
                 input_dir,
                 [
                     "scRNA_barcodeWhitelist.tsv*",
+                    "scRNA_barcodeWhitelist.*",
                     "gRNA_barcodeWhitelist.tsv*",
+                    "gRNA_barcodeWhitelist.*",
                     "hash_barcodeWhitelist.tsv*",
+                    "hash_barcodeWhitelist.*",
                     "*barcodeWhitelist.tsv*",
+                    "*barcodeWhitelist.*",
                 ],
             )
         if not resolved["guide_metadata"]:
@@ -733,9 +756,13 @@ def resolve_inputs(args: argparse.Namespace) -> Dict[str, object]:
                 input_dir,
                 [
                     "gRNA_guideMetadata.tsv*",
+                    "gRNA_guideMetadata.*",
                     "scRNA_guideMetadata.tsv*",
+                    "scRNA_guideMetadata.*",
                     "hash_guideMetadata.tsv*",
+                    "hash_guideMetadata.*",
                     "*guideMetadata.tsv*",
+                    "*guideMetadata.*",
                 ],
             )
         if not resolved["hash_metadata"]:
@@ -743,7 +770,9 @@ def resolve_inputs(args: argparse.Namespace) -> Dict[str, object]:
                 input_dir,
                 [
                     "hash_hashMetadata.tsv*",
+                    "hash_hashMetadata.*",
                     "*hashMetadata.tsv*",
+                    "*hashMetadata.*",
                 ],
             )
 
